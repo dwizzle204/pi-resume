@@ -161,6 +161,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.session = nil
 		m.cursor = 0
 		return m, nil
+
+	case resumeResult:
+		if msg.err != nil {
+			m.msg = fmt.Sprintf("pi exited: %v", msg.err)
+		}
+		return m, tea.Quit
 	}
 
 	return m, nil
