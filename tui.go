@@ -100,20 +100,16 @@ func loadSessions(db *sql.DB, folder string) tea.Cmd {
 }
 
 func resumeSession(s Session) tea.Cmd {
-	return func() tea.Msg {
-		if s.CWD != "" {
-			os.Chdir(s.CWD)
-		}
-		cmd := exec.Command("pi", "--session", s.Path)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Env = os.Environ()
-		if err := cmd.Run(); err != nil {
+	if s.CWD != "" {
+		os.Chdir(s.CWD)
+	}
+	cmd := exec.Command("pi", "--session", s.Path)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
 			return resumeResult{err: err}
 		}
 		return resumeResult{}
-	}
+	})
 }
 
 func findSessionByPath(ss []Session, path string) *Session {
@@ -303,9 +299,9 @@ func (m *model) refreshFolderTable() {
 
 func (m *model) refreshSessionTable() {
 	columns := []table.Column{
-		table.NewColumn(columnKeyTS, "Timestamp", 21),
+		table.NewColumn(columnKeyTS, "Timestamp", 20),
 		table.NewFlexColumn(columnKeyTitle, "Session", 1),
-		table.NewColumn(columnKeyModel, "Model", 28),
+		table.NewColumn(columnKeyModel, "Model", 15),
 	}
 
 	rows := make([]table.Row, len(m.sessions))
