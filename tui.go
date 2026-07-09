@@ -23,24 +23,21 @@ var (
 			Foreground(highlight).
 			Bold(true)
 
-	emptyStyle = lipgloss.NewStyle().
-			Padding(0, 1).
-			Foreground(subtle).
-			Italic(true)
-
 	previewLabel = lipgloss.NewStyle().
 			Foreground(subtle)
 
 	subtleStyle = lipgloss.NewStyle().Foreground(subtle)
 )
 
-const columnKeyName = "name"
-const columnKeyCount = "count"
-const columnKeyTS = "ts"
-const columnKeyTitle = "title"
-const columnKeyModel = "model"
-const columnKeyFolderPath = "folder_path"
-const columnKeySessionPath = "session_path"
+const (
+	columnKeyName        = "name"
+	columnKeyCount       = "count"
+	columnKeyTS          = "ts"
+	columnKeyTitle       = "title"
+	columnKeyModel       = "model"
+	columnKeyFolderPath  = "folder_path"
+	columnKeySessionPath = "session_path"
+)
 
 type view int
 
@@ -50,17 +47,18 @@ const (
 )
 
 type model struct {
-	db       *sql.DB
-	view     view
-	folders  []FolderInfo
-	sessions []Session
-	table    table.Model
-	session  *Session
-	ready    bool
-	width    int
-	height   int
-	quitting bool
-	msg      string
+	db           *sql.DB
+	view         view
+	folders      []FolderInfo
+	sessions     []Session
+	folderTable  table.Model
+	sessionTable table.Model
+	session      *Session
+	ready        bool
+	width        int
+	height       int
+	quitting     bool
+	msg          string
 }
 
 func initialModel(db *sql.DB) model {
@@ -121,6 +119,30 @@ func findSessionByPath(ss []Session, path string) *Session {
 	return nil
 }
 
+func (m model) highlightedFolderName() string {
+	row := m.folderTable.HighlightedRow()
+	if name, ok := row.Data[columnKeyFolderPath].(string); ok && name != "" {
+		return name
+	}
+	idx := m.folderTable.GetHighlightedRowIndex()
+	if idx >= 0 && idx < len(m.folders) {
+		return m.folders[idx].Name
+	}
+	return ""
+}
+
+func (m model) highlightedSessionPath() string {
+	row := m.sessionTable.HighlightedRow()
+	if path, ok := row.Data[columnKeySessionPath].(string); ok && path != "" {
+		return path
+	}
+	idx := m.sessionTable.GetHighlightedRowIndex()
+	if idx >= 0 && idx < len(m.sessions) {
+		return m.sessions[idx].Path
+	}
+	return ""
+}
+
 func (m model) Init() tea.Cmd {
 	return loadFolders(m.db)
 }
@@ -131,9 +153,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
-		if m.view == foldersView {
-			if m.table.TotalRows() == 0 {
-				m.refreshFolderTable()
+		if m.width > 2 {
+			w := m.width - 2
+			if m.folderTable.TotalRows() > 0 {
+				m.folderTable = m.folderTable.WithTargetWidth(w)
+			}
+			if m.sessionTable.TotalRows() > 0 {
+				m.sessionTable = m.sessionTable.WithTargetWidth(w)
 			}
 		}
 		return m, nil
@@ -146,7 +172,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.folders == nil {
 			m.folders = []FolderInfo{}
 		}
-		m.refreshFolderTable()
+		m.buildFolderTable()
 		return m, nil
 
 	case sessionsLoadedMsg:
@@ -154,7 +180,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.sessions == nil {
 			m.sessions = []Session{}
 		}
-		m.refreshSessionTable()
+		m.buildSessionTable()
 		return m, nil
 
 	case resumeResult:
@@ -188,18 +214,17 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
-	m.table, cmd = m.table.Update(msg)
+	if m.view == foldersView {
+		m.folderTable, cmd = m.folderTable.Update(msg)
+	} else {
+		m.sessionTable, cmd = m.sessionTable.Update(msg)
+	}
 	return m, cmd
 }
 
 func (m model) handleEnter() (tea.Model, tea.Cmd) {
-	row := m.table.HighlightedRow()
-
 	if m.view == foldersView {
-		folder, _ := row.Data[columnKeyFolderPath].(string)
-		if folder == "" && len(m.folders) > 0 {
-			folder = m.folders[m.table.GetHighlightedRowIndex()].Name
-		}
+		folder := m.highlightedFolderName()
 		if folder != "" {
 			m.view = sessionsView
 			m.session = nil
@@ -208,14 +233,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// sessionsView
-	path, _ := row.Data[columnKeySessionPath].(string)
-	if path == "" && len(m.sessions) > 0 {
-		idx := m.table.GetHighlightedRowIndex()
-		if idx >= 0 && idx < len(m.sessions) {
-			path = m.sessions[idx].Path
-		}
-	}
+	path := m.highlightedSessionPath()
 	if path != "" {
 		s := findSessionByPath(m.sessions, path)
 		if s != nil {
@@ -228,42 +246,35 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 func (m model) handleBack() (tea.Model, tea.Cmd) {
 	if m.view == sessionsView {
 		m.view = foldersView
-		m.refreshFolderTable()
 		m.session = nil
 	}
 	return m, nil
 }
 
 func (m model) handleSpace() (tea.Model, tea.Cmd) {
-	if m.view == sessionsView {
-		row := m.table.HighlightedRow()
-		path, _ := row.Data[columnKeySessionPath].(string)
-		if path == "" && len(m.sessions) > 0 {
-			idx := m.table.GetHighlightedRowIndex()
-			if idx >= 0 && idx < len(m.sessions) {
-				path = m.sessions[idx].Path
-			}
-		}
-		if path != "" {
-			if m.session != nil && m.session.Path == path {
-				m.session = nil
-			} else {
-				s := findSessionByPath(m.sessions, path)
-				if s != nil {
-					m.session = s
-				}
-			}
+	if m.view != sessionsView {
+		return m, nil
+	}
+	path := m.highlightedSessionPath()
+	if path == "" {
+		return m, nil
+	}
+	if m.session != nil && m.session.Path == path {
+		m.session = nil
+	} else {
+		s := findSessionByPath(m.sessions, path)
+		if s != nil {
+			m.session = s
 		}
 	}
 	return m, nil
 }
 
 func baseTableStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Padding(0, 1)
+	return lipgloss.NewStyle().Padding(0, 1)
 }
 
-func (m *model) refreshFolderTable() {
+func (m *model) buildFolderTable() {
 	columns := []table.Column{
 		table.NewFlexColumn(columnKeyName, "Folder", 1),
 		table.NewColumn(columnKeyCount, "#", 5),
@@ -278,12 +289,10 @@ func (m *model) refreshFolderTable() {
 		})
 	}
 
-	pageSize := clamp(8, 30, len(m.folders))
-
-	m.table = table.New(columns).
+	t := table.New(columns).
 		WithRows(rows).
 		Focused(true).
-		WithPageSize(pageSize).
+		WithPageSize(clamp(8, 30, len(m.folders))).
 		WithBaseStyle(baseTableStyle()).
 		HighlightStyle(lipgloss.NewStyle().
 			Background(highlight).
@@ -292,12 +301,13 @@ func (m *model) refreshFolderTable() {
 		WithFooterVisibility(false).
 		WithPaginationWrapping(true)
 
-	if m.width > 0 {
-		m.table = m.table.WithTargetWidth(m.width - 2)
+	if m.width > 2 {
+		t = t.WithTargetWidth(m.width - 2)
 	}
+	m.folderTable = t
 }
 
-func (m *model) refreshSessionTable() {
+func (m *model) buildSessionTable() {
 	columns := []table.Column{
 		table.NewColumn(columnKeyTS, "Timestamp", 20),
 		table.NewFlexColumn(columnKeyTitle, "Session", 1),
@@ -311,23 +321,20 @@ func (m *model) refreshSessionTable() {
 		if title == "" {
 			title = "(untitled)"
 		}
-		modelName := truncate(s.Model, 25)
 		safeTitle := strings.NewReplacer("\n", " ", "\r", "").Replace(title)
 
 		rows[i] = table.NewRow(table.RowData{
 			columnKeyTS:          ts,
 			columnKeyTitle:       truncate(safeTitle, 70),
-			columnKeyModel:       modelName,
+			columnKeyModel:       truncate(s.Model, 25),
 			columnKeySessionPath: s.Path,
 		})
 	}
 
-	pageSize := clamp(5, 30, len(m.sessions))
-
-	m.table = table.New(columns).
+	t := table.New(columns).
 		WithRows(rows).
 		Focused(true).
-		WithPageSize(pageSize).
+		WithPageSize(clamp(5, 30, len(m.sessions))).
 		WithBaseStyle(baseTableStyle()).
 		HighlightStyle(lipgloss.NewStyle().
 			Background(highlight).
@@ -336,13 +343,10 @@ func (m *model) refreshSessionTable() {
 		WithFooterVisibility(false).
 		WithPaginationWrapping(true)
 
-	if m.width > 0 {
-		tableW := m.width - 2
-		if tableW > 60 {
-			tableW = 60
-		}
-		m.table = m.table.WithTargetWidth(tableW)
+	if m.width > 2 {
+		t = t.WithTargetWidth(m.width - 2)
 	}
+	m.sessionTable = t
 }
 
 func clamp(min, max, val int) int {
@@ -363,36 +367,44 @@ func (m model) View() string {
 		return ""
 	}
 
+	w := m.contentWidth()
+
 	if m.view == foldersView {
-		return m.foldersView()
+		return m.foldersView(w)
 	}
-	return m.sessionsView()
+	return m.sessionsView(w)
 }
 
-func (m model) foldersView() string {
+func (m model) contentWidth() int {
+	w := m.width - 2
+	if w < 40 {
+		w = 40
+	}
+	return w
+}
+
+func (m model) foldersView(w int) string {
 	var b strings.Builder
 
-	b.WriteString(header("Folders – select a project directory"))
+	b.WriteString(header("Folders", w))
 	b.WriteString("\n")
-	b.WriteString(m.table.View())
+	b.WriteString(m.folderTable.View())
 	b.WriteString("\n")
-	b.WriteString(footer(len(m.folders), 0))
+	b.WriteString(footer(len(m.folders), 0, w))
 
 	return b.String()
 }
 
-func (m model) sessionsView() string {
+func (m model) sessionsView(w int) string {
 	var b strings.Builder
 
 	folderName := ""
 	if len(m.sessions) > 0 {
 		folderName = m.sessions[0].Folder
-	} else if len(m.folders) > 0 && m.table.GetHighlightedRowIndex() < len(m.folders) {
-		folderName = m.folders[m.table.GetHighlightedRowIndex()].Name
 	}
-	b.WriteString(header(folderName))
+	b.WriteString(header(folderName, w))
 	b.WriteString("\n")
-	b.WriteString(m.table.View())
+	b.WriteString(m.sessionTable.View())
 
 	if m.session != nil {
 		b.WriteString("\n")
@@ -400,7 +412,7 @@ func (m model) sessionsView() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(footer(len(m.sessions), 1))
+	b.WriteString(footer(len(m.sessions), 1, w))
 
 	return b.String()
 }
@@ -470,8 +482,11 @@ func buildPreview(s Session) string {
 	return b.String()
 }
 
-func header(title string) string {
-	w := 60
+func header(title string, width int) string {
+	w := width
+	if w < 20 {
+		w = 20
+	}
 	if len(title) > w-4 {
 		title = truncate(title, w-7)
 	}
@@ -483,7 +498,7 @@ func header(title string) string {
 	return titleStyle.Render(left + strings.Repeat("\u2500", right))
 }
 
-func footer(count int, viewType int) string {
+func footer(count, viewType, width int) string {
 	var hints string
 	if viewType == 0 {
 		hints = "\u2191\u2193 navigate  \u23ce open folder  q/ctrl+c quit"
@@ -494,7 +509,7 @@ func footer(count int, viewType int) string {
 	if count != 1 {
 		f += "s"
 	}
-	padLen := 60 - lipgloss.Width(f) - lipgloss.Width(hints) - 2
+	padLen := width - lipgloss.Width(f) - lipgloss.Width(hints) - 2
 	if padLen < 1 {
 		padLen = 1
 	}
