@@ -86,8 +86,12 @@ func openDB() (*sql.DB, error) {
 	return db, nil
 }
 
-func refresh() error {
-	sessionsDir := filepath.Join(os.Getenv("HOME"), ".pi", "agent", "sessions")
+func refresh(db *sql.DB) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("getting home dir: %w", err)
+	}
+	sessionsDir := filepath.Join(home, ".pi", "agent", "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		return fmt.Errorf("reading sessions dir: %w", err)
@@ -114,25 +118,29 @@ func refresh() error {
 
 	sort.Slice(all, func(i, j int) bool { return all[i].MTime > all[j].MTime })
 
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
 	if _, err := db.Exec("DELETE FROM sessions"); err != nil {
 		return err
 	}
 
-	tx, _ := db.Begin()
-	stmt, _ := tx.Prepare(`INSERT INTO sessions
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO sessions
 		(folder,cwd,model,title,path,sid,last_ts,created,mtime)
 		VALUES (?,?,?,?,?,?,?,?,?)`)
+	if err != nil {
+		return fmt.Errorf("prepare stmt: %w", err)
+	}
 
 	for _, s := range all {
-		stmt.Exec(s.Folder, s.CWD, s.Model, s.Title, s.Path, s.SID, s.LastTS, s.Created, s.MTime)
+		if _, err := stmt.Exec(s.Folder, s.CWD, s.Model, s.Title, s.Path, s.SID, s.LastTS, s.Created, s.MTime); err != nil {
+			return fmt.Errorf("insert %s: %w", s.Path, err)
+		}
 	}
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tx: %w", err)
+	}
 
 	seen := map[string]int{}
 	for _, s := range all {
@@ -343,7 +351,7 @@ func pickFolder(db *sql.DB) (string, error) {
 
 	out, err := cmd.Output()
 	if err != nil {
-		return "", nil
+		return "", fmt.Errorf("fzf: %w (is fzf installed?)", err)
 	}
 
 	line := strings.TrimSpace(string(out))
@@ -404,7 +412,7 @@ func pickSession(db *sql.DB, folder string) (*Session, error) {
 
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("fzf: %w (is fzf installed?)", err)
 	}
 
 	line := strings.TrimSpace(string(out))
@@ -442,17 +450,10 @@ func run() int {
 
 	// Always refresh to pick up new sessions.
 	// ~1s for 200 sessions — fast enough for interactive use.
-	if err := refresh(); err != nil {
+	if err := refresh(db); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
 	}
-	db.Close()
-	db, err = openDB()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "DB error: %v\n", err)
-		return 1
-	}
-	defer db.Close()
 
 	for {
 		folder, err := pickFolder(db)
