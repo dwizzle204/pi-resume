@@ -276,8 +276,8 @@ func baseTableStyle() lipgloss.Style {
 
 func (m *model) buildFolderTable() {
 	columns := []table.Column{
-		table.NewFlexColumn(columnKeyName, "Folder", 1),
-		table.NewColumn(columnKeyCount, "#", 5),
+		table.NewFlexColumn(columnKeyName, "Project Directory", 1),
+		table.NewColumn(columnKeyCount, "Available Sessions", 18),
 	}
 
 	rows := make([]table.Row, len(m.folders))
@@ -297,7 +297,7 @@ func (m *model) buildFolderTable() {
 		HighlightStyle(lipgloss.NewStyle().
 			Background(highlight).
 			Foreground(lipgloss.Color("#FFFFFF"))).
-		WithHeaderVisibility(false).
+		WithHeaderVisibility(true).
 		WithFooterVisibility(false).
 		WithPaginationWrapping(true)
 
@@ -386,7 +386,7 @@ func (m model) contentWidth() int {
 func (m model) foldersView(w int) string {
 	var b strings.Builder
 
-	b.WriteString(header("Folders", w))
+	b.WriteString(header("Select a Project Directory", w))
 	b.WriteString("\n")
 	b.WriteString(m.folderTable.View())
 	b.WriteString("\n")
