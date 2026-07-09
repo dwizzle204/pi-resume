@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -309,6 +310,16 @@ func safeTab(s string) string {
 	return strings.NewReplacer("\t", " ", "\n", " ", "\r", "").Replace(s)
 }
 
+// fzfCommand returns an exec.Cmd for fzf with the given args.
+// On Windows, wraps through cmd /c for proper console handling.
+func fzfCommand(args ...string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		all := append([]string{"/c", "fzf"}, args...)
+		return exec.Command("cmd", all...)
+	}
+	return exec.Command("fzf", args...)
+}
+
 func findSession(ss []Session, path string) *Session {
 	for _, s := range ss {
 		if s.Path == path {
@@ -338,7 +349,7 @@ func pickFolder(db *sql.DB) (string, error) {
 			truncate(safeTab(f.LastModel), 25), safeTab(f.LastCWD), safeTab(f.LastPath)))
 	}
 
-	cmd := exec.Command("fzf",
+	cmd := fzfCommand(
 		"--height=85%", "--layout=reverse", "--border",
 		"--prompt=\u25b8 ",
 		"--delimiter=\\t",
@@ -396,10 +407,10 @@ func pickSession(db *sql.DB, folder string) (*Session, error) {
 			truncate(safeTab(s.Model), 25), s.Path, s.SID, s.CWD))
 	}
 
-	cmd := exec.Command("fzf",
+	cmd := fzfCommand(
 		"--height=85%", "--layout=reverse", "--border",
 		fmt.Sprintf("--prompt=\u25b8 %s > ", folder),
-		"--delimiter=\\t",
+		"--delimiter=\t",
 		"--with-nth=1,2,3",
 		"--preview", sessionPreviewScript(),
 		fmt.Sprintf("--preview-label= %s ", folder),
