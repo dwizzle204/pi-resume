@@ -11,9 +11,8 @@ import (
 
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/evertras/bubble-table/table"
 )
-
-// ── Styles ──────────────────────────────────────────────────────────────
 
 var (
 	subtle    = lipgloss.AdaptiveColor{Light: "#9B9B9B", Dark: "#5C5C5C"}
@@ -23,16 +22,6 @@ var (
 			Padding(0, 1).
 			Foreground(highlight).
 			Bold(true)
-
-	folderLine = lipgloss.NewStyle().
-			Padding(0, 1).
-			Width(50)
-
-	folderActive = lipgloss.NewStyle().
-			Padding(0, 1).
-			Width(50).
-			Background(highlight).
-			Foreground(lipgloss.Color("#FFFFFF"))
 
 	emptyStyle = lipgloss.NewStyle().
 			Padding(0, 1).
@@ -45,7 +34,13 @@ var (
 	subtleStyle = lipgloss.NewStyle().Foreground(subtle)
 )
 
-// ── Model ───────────────────────────────────────────────────────────────
+const columnKeyName = "name"
+const columnKeyCount = "count"
+const columnKeyTS = "ts"
+const columnKeyTitle = "title"
+const columnKeyModel = "model"
+const columnKeyFolderPath = "folder_path"
+const columnKeySessionPath = "session_path"
 
 type view int
 
@@ -59,8 +54,8 @@ type model struct {
 	view     view
 	folders  []FolderInfo
 	sessions []Session
+	table    table.Model
 	session  *Session
-	cursor   int
 	ready    bool
 	width    int
 	height   int
@@ -71,8 +66,6 @@ type model struct {
 func initialModel(db *sql.DB) model {
 	return model{db: db, view: foldersView}
 }
-
-// ── Messages ────────────────────────────────────────────────────────────
 
 type foldersLoadedMsg struct {
 	folders []FolderInfo
@@ -123,7 +116,14 @@ func resumeSession(s Session) tea.Cmd {
 	}
 }
 
-// ── Bubble Tea lifecycle ────────────────────────────────────────────────
+func findSessionByPath(ss []Session, path string) *Session {
+	for i := range ss {
+		if ss[i].Path == path {
+			return &ss[i]
+		}
+	}
+	return nil
+}
 
 func (m model) Init() tea.Cmd {
 	return loadFolders(m.db)
@@ -135,31 +135,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
+		if m.view == foldersView {
+			if m.table.TotalRows() == 0 {
+				m.refreshFolderTable()
+			}
+		}
 		return m, nil
 
 	case tea.KeyMsg:
-		if m.quitting {
-			return m, tea.Quit
-		}
-		switch msg.String() {
-		case "q", "ctrl+c":
-			m.quitting = true
-			return m, tea.Quit
-		}
-
-		if m.view == foldersView {
-			return updateFolders(m, msg)
-		}
-		return updateSessions(m, msg)
+		return m.handleKeyMsg(msg)
 
 	case foldersLoadedMsg:
 		m.folders = msg.folders
+		if m.folders == nil {
+			m.folders = []FolderInfo{}
+		}
+		m.refreshFolderTable()
 		return m, nil
 
 	case sessionsLoadedMsg:
 		m.sessions = msg.sessions
-		m.session = nil
-		m.cursor = 0
+		if m.sessions == nil {
+			m.sessions = []Session{}
+		}
+		m.refreshSessionTable()
 		return m, nil
 
 	case resumeResult:
@@ -172,69 +171,193 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func updateFolders(m model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
-	case "down", "j":
-		if m.cursor < len(m.folders)-1 {
-			m.cursor++
-		}
-	case "enter", "right", "l":
-		f := m.folders[m.cursor]
-		m.view = sessionsView
-		m.cursor = 0
-		return m, loadSessions(m.db, f.Name)
-	case "home", "g":
-		m.cursor = 0
-	case "end", "G":
-		m.cursor = len(m.folders) - 1
+func (m model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.quitting {
+		return m, tea.Quit
 	}
-	return m, nil
-}
 
-func updateSessions(m model, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-			m.session = nil
-		}
-	case "down", "j":
-		if m.cursor < len(m.sessions)-1 {
-			m.cursor++
-			m.session = nil
-		}
-	case "home", "g":
-		m.cursor = 0
-		m.session = nil
-	case "end", "G":
-		m.cursor = len(m.sessions) - 1
-		m.session = nil
+	case "q", "ctrl+c":
+		m.quitting = true
+		return m, tea.Quit
+
 	case "enter":
-		if len(m.sessions) > 0 {
-			s := m.sessions[m.cursor]
-			return m, resumeSession(s)
-		}
+		return m.handleEnter()
+
 	case "left", "esc", "backspace":
-		m.view = foldersView
-		m.sessions = nil
-		m.session = nil
-		m.cursor = 0
-		return m, nil
+		return m.handleBack()
+
 	case " ":
-		if m.session != nil && m.session.Path == m.sessions[m.cursor].Path {
+		return m.handleSpace()
+	}
+
+	var cmd tea.Cmd
+	m.table, cmd = m.table.Update(msg)
+	return m, cmd
+}
+
+func (m model) handleEnter() (tea.Model, tea.Cmd) {
+	row := m.table.HighlightedRow()
+
+	if m.view == foldersView {
+		folder, _ := row.Data[columnKeyFolderPath].(string)
+		if folder == "" && len(m.folders) > 0 {
+			folder = m.folders[m.table.GetHighlightedRowIndex()].Name
+		}
+		if folder != "" {
+			m.view = sessionsView
 			m.session = nil
-		} else {
-			m.session = &m.sessions[m.cursor]
+			return m, loadSessions(m.db, folder)
+		}
+		return m, nil
+	}
+
+	// sessionsView
+	path, _ := row.Data[columnKeySessionPath].(string)
+	if path == "" && len(m.sessions) > 0 {
+		idx := m.table.GetHighlightedRowIndex()
+		if idx >= 0 && idx < len(m.sessions) {
+			path = m.sessions[idx].Path
+		}
+	}
+	if path != "" {
+		s := findSessionByPath(m.sessions, path)
+		if s != nil {
+			return m, resumeSession(*s)
 		}
 	}
 	return m, nil
 }
 
-// ── Views ───────────────────────────────────────────────────────────────
+func (m model) handleBack() (tea.Model, tea.Cmd) {
+	if m.view == sessionsView {
+		m.view = foldersView
+		m.refreshFolderTable()
+		m.session = nil
+	}
+	return m, nil
+}
+
+func (m model) handleSpace() (tea.Model, tea.Cmd) {
+	if m.view == sessionsView {
+		row := m.table.HighlightedRow()
+		path, _ := row.Data[columnKeySessionPath].(string)
+		if path == "" && len(m.sessions) > 0 {
+			idx := m.table.GetHighlightedRowIndex()
+			if idx >= 0 && idx < len(m.sessions) {
+				path = m.sessions[idx].Path
+			}
+		}
+		if path != "" {
+			if m.session != nil && m.session.Path == path {
+				m.session = nil
+			} else {
+				s := findSessionByPath(m.sessions, path)
+				if s != nil {
+					m.session = s
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+func baseTableStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Padding(0, 1)
+}
+
+func (m *model) refreshFolderTable() {
+	columns := []table.Column{
+		table.NewFlexColumn(columnKeyName, "Folder", 1),
+		table.NewColumn(columnKeyCount, "#", 5),
+	}
+
+	rows := make([]table.Row, len(m.folders))
+	for i, f := range m.folders {
+		rows[i] = table.NewRow(table.RowData{
+			columnKeyName:       f.Name,
+			columnKeyCount:      f.Count,
+			columnKeyFolderPath: f.Name,
+		})
+	}
+
+	pageSize := clamp(8, 30, len(m.folders))
+
+	m.table = table.New(columns).
+		WithRows(rows).
+		Focused(true).
+		WithPageSize(pageSize).
+		WithBaseStyle(baseTableStyle()).
+		HighlightStyle(lipgloss.NewStyle().
+			Background(highlight).
+			Foreground(lipgloss.Color("#FFFFFF"))).
+		WithHeaderVisibility(true).
+		WithFooterVisibility(false).
+		WithPaginationWrapping(true)
+
+	if m.width > 0 {
+		m.table = m.table.WithTargetWidth(m.width - 2)
+	}
+}
+
+func (m *model) refreshSessionTable() {
+	columns := []table.Column{
+		table.NewColumn(columnKeyTS, "Timestamp", 21),
+		table.NewFlexColumn(columnKeyTitle, "Session", 1),
+		table.NewColumn(columnKeyModel, "Model", 28),
+	}
+
+	rows := make([]table.Row, len(m.sessions))
+	for i, s := range m.sessions {
+		ts := truncate(s.LastTS, 19)
+		title := s.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		modelName := truncate(s.Model, 25)
+		safeTitle := strings.NewReplacer("\n", " ", "\r", "").Replace(title)
+
+		rows[i] = table.NewRow(table.RowData{
+			columnKeyTS:          ts,
+			columnKeyTitle:       truncate(safeTitle, 70),
+			columnKeyModel:       modelName,
+			columnKeySessionPath: s.Path,
+		})
+	}
+
+	pageSize := clamp(5, 30, len(m.sessions))
+
+	m.table = table.New(columns).
+		WithRows(rows).
+		Focused(true).
+		WithPageSize(pageSize).
+		WithBaseStyle(baseTableStyle()).
+		HighlightStyle(lipgloss.NewStyle().
+			Background(highlight).
+			Foreground(lipgloss.Color("#FFFFFF"))).
+		WithHeaderVisibility(true).
+		WithFooterVisibility(false).
+		WithPaginationWrapping(true)
+
+	if m.width > 0 {
+		tableW := m.width - 2
+		if tableW > 60 {
+			tableW = 60
+		}
+		m.table = m.table.WithTargetWidth(tableW)
+	}
+}
+
+func clamp(min, max, val int) int {
+	if val < min {
+		return min
+	}
+	if val > max {
+		return max
+	}
+	return val
+}
 
 func (m model) View() string {
 	if !m.ready {
@@ -253,24 +376,9 @@ func (m model) View() string {
 func (m model) foldersView() string {
 	var b strings.Builder
 
-	b.WriteString(header("Folders"))
-	b.WriteString("\n\n")
-
-	for i, f := range m.folders {
-		line := fmt.Sprintf("  %s  %d", f.Name, f.Count)
-		if i == m.cursor {
-			b.WriteString(folderActive.Render(line))
-		} else {
-			b.WriteString(folderLine.Render(line))
-		}
-		b.WriteString("\n")
-	}
-
-	if len(m.folders) == 0 {
-		b.WriteString(emptyStyle.Render("  No sessions found"))
-		b.WriteString("\n")
-	}
-
+	b.WriteString(header("Folders – select a project directory"))
+	b.WriteString("\n")
+	b.WriteString(m.table.View())
 	b.WriteString("\n")
 	b.WriteString(footer(len(m.folders), 0))
 
@@ -281,44 +389,18 @@ func (m model) sessionsView() string {
 	var b strings.Builder
 
 	folderName := ""
-	if m.cursor < len(m.sessions) {
-		folderName = m.sessions[m.cursor].Folder
-	} else if len(m.sessions) > 0 {
+	if len(m.sessions) > 0 {
 		folderName = m.sessions[0].Folder
+	} else if len(m.folders) > 0 && m.table.GetHighlightedRowIndex() < len(m.folders) {
+		folderName = m.folders[m.table.GetHighlightedRowIndex()].Name
 	}
-
 	b.WriteString(header(folderName))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	b.WriteString(m.table.View())
 
-	if len(m.sessions) == 0 {
-		b.WriteString(emptyStyle.Render("  No sessions"))
+	if m.session != nil {
 		b.WriteString("\n")
-	} else {
-		listWidth := 60
-
-		for i, s := range m.sessions {
-			ts := truncate(s.LastTS, 19)
-			title := s.Title
-			if title == "" {
-				title = "(untitled)"
-			}
-			modelName := truncate(s.Model, 25)
-
-			line := fmt.Sprintf("  %s  %s  %s",
-				ts, truncate(title, listWidth-28), modelName)
-
-			if i == m.cursor {
-				b.WriteString(folderActive.Render(line))
-			} else {
-				b.WriteString(folderLine.Render(line))
-			}
-			b.WriteString("\n")
-
-			if i == m.cursor {
-				b.WriteString(buildPreview(s))
-				b.WriteString("\n")
-			}
-		}
+		b.WriteString(buildPreview(*m.session))
 	}
 
 	b.WriteString("\n")
@@ -412,7 +494,10 @@ func footer(count int, viewType int) string {
 	} else {
 		hints = "\u2191\u2193 navigate  \u23ce resume  \u2190 back  space preview  q quit"
 	}
-	f := fmt.Sprintf(" %d sessions ", count)
+	f := fmt.Sprintf(" %d session", count)
+	if count != 1 {
+		f += "s"
+	}
 	padLen := 60 - lipgloss.Width(f) - lipgloss.Width(hints) - 2
 	if padLen < 1 {
 		padLen = 1
