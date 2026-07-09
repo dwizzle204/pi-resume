@@ -4,9 +4,7 @@
 // TUI:   fzf subprocess for folders → sessions two-level picker
 //
 // Usage:
-//   pi-resume          interactive picker
-//   pi-resume refresh  rebuild cache from disk
-//   pi-resume list     dump all sessions
+//   pi-resume    interactive picker
 
 package main
 
@@ -430,39 +428,11 @@ func resume(s *Session) error {
 	return cmd.Run()
 }
 
-func listAll(db *sql.DB) error {
-	ff, err := listFolders(db)
-	if err != nil {
-		return err
-	}
-	for _, f := range ff {
-		fmt.Printf("\u25b6 %s  (%d)\n", f.Name, f.Count)
-		ss, err := listSessions(db, f.Name)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error listing %s: %v\n", f.Name, err)
-			continue
-		}
-		for _, s := range ss {
-			fmt.Printf("  %s  %s  %s\n",
-				truncate(s.LastTS, 19), truncate(s.Title, 50), truncate(s.Model, 25))
-		}
-	}
-	return nil
-}
-
 func main() {
 	os.Exit(run())
 }
 
 func run() int {
-	if len(os.Args) > 1 && os.Args[1] == "refresh" {
-		if err := refresh(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
-		}
-		return 0
-	}
-
 	db, err := openDB()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "DB error: %v\n", err)
@@ -470,30 +440,19 @@ func run() int {
 	}
 	defer db.Close()
 
-	if len(os.Args) > 1 && os.Args[1] == "list" {
-		if err := listAll(db); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
-		}
-		return 0
+	// Always refresh to pick up new sessions.
+	// ~1s for 200 sessions — fast enough for interactive use.
+	if err := refresh(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
 	}
-
-	var cnt int
-	db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&cnt)
-	if cnt == 0 {
-		fmt.Println("Scanning sessions...")
-		if err := refresh(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return 1
-		}
-		db.Close()
-		db, err = openDB()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "DB error: %v\n", err)
-			return 1
-		}
-		defer db.Close()
+	db.Close()
+	db, err = openDB()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "DB error: %v\n", err)
+		return 1
 	}
+	defer db.Close()
 
 	for {
 		folder, err := pickFolder(db)

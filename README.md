@@ -11,12 +11,10 @@ A two-level fzf session picker for [pi](https://github.com/obra/pi) coding agent
 ## Usage
 
 ```
-pi-resume           Interactive picker
-pi-resume list      List all sessions in the terminal
-pi-resume refresh   Rebuild the session cache from disk
+pi-resume    Interactive session picker
 ```
 
-When launched interactively:
+When launched:
 
 1. Pick a folder → press Enter (or right arrow)
 2. Pick a session → press Enter
