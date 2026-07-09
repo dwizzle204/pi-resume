@@ -297,7 +297,7 @@ func (m *model) buildFolderTable() {
 		HighlightStyle(lipgloss.NewStyle().
 			Background(highlight).
 			Foreground(lipgloss.Color("#FFFFFF"))).
-		WithHeaderVisibility(true).
+		WithHeaderVisibility(false).
 		WithFooterVisibility(false).
 		WithPaginationWrapping(true)
 
